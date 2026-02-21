@@ -5,81 +5,57 @@ from fpdf import FPDF
 import tempfile
 import os
 
-# 1. Configuração de Título e Layout
 st.set_page_config(page_title="🛡️ Vistor.IA Pro", layout="wide")
-st.title("🛡️ Vistor.IA Pro - Inteligência em Vistoria") 
+st.title("🛡️ Vistor.IA Pro - Inteligência em Vistoria")
 
-# 2. Entrada da API Key na Barra Lateral
 api_key = st.sidebar.text_input("Insira sua Gemini API Key", type="password")
 
 if api_key:
     try:
-        # FORÇAR USO DA API v1 ESTÁVEL (Resolve o erro 404 da v1beta)
-        os.environ["GOOGLE_GENERATIVE_AI_NETWORK_ENDPOINT"] = "generativelanguage.googleapis.com"
         genai.configure(api_key=api_key)
         
-        # Inicialização do modelo
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # --- DIAGNÓSTICO DE MODELO ---
+        # Listamos os modelos que sua chave realmente pode acessar
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         
-        # 3. Interface de Upload
-        uploaded_files = st.file_uploader("Arraste ou selecione as fotos da vistoria", 
-                                        accept_multiple_files=True, type=['png', 'jpg', 'jpeg'])
+        # Tentamos selecionar o melhor disponível na hierarquia
+        if 'models/gemini-1.5-flash' in available_models:
+            target_model = 'gemini-1.5-flash'
+        elif 'models/gemini-1.5-pro' in available_models:
+            target_model = 'gemini-1.5-pro'
+        elif 'models/gemini-pro-vision' in available_models:
+            target_model = 'gemini-pro-vision'
+        else:
+            target_model = available_models[0] if available_models else None
 
-        if uploaded_files:
-            if st.button("🚀 Efetuar Análise Técnica"):
+        if target_model:
+            st.sidebar.success(f"Conectado ao modelo: {target_model}")
+            model = genai.GenerativeModel(target_model)
+            
+            uploaded_files = st.file_uploader("Fotos da vistoria", accept_multiple_files=True, type=['png', 'jpg', 'jpeg'])
+
+            if uploaded_files and st.button("🚀 Efetuar Análise Técnica"):
                 resultados_texto = ""
-                
                 for uploaded_file in uploaded_files:
-                    # Preparação da imagem
                     img_pil = Image.open(uploaded_file)
-                    st.image(img_pil, width=300, caption=f"Arquivo: {uploaded_file.name}")
+                    st.image(img_pil, width=300, caption=uploaded_file.name)
                     
-                    # Instrução do Sistema (Lógica de Engenharia)
-                    prompt = """Aja como Engenheiro Civil Perito. Identifique o cômodo. 
-                    Gere uma tabela Markdown com: Elemento, Material, Estado (🟢, 🟡, 🔴), 
-                    Diagnóstico Técnico e Idade Aparente. Determine o Padrão (Baixo/Médio/Alto)."""
+                    prompt = "Aja como Engenheiro Perito. Identifique cômodo, material, estado (🟢🟡🔴) e patologias em tabela."
                     
-                    # Chamada da API com tratamento de erro
                     try:
-                        with st.spinner(f"Analisando {uploaded_file.name}..."):
-                            # Envio explícito para processamento
+                        with st.spinner(f"Analisando com {target_model}..."):
                             response = model.generate_content([prompt, img_pil])
                             st.markdown(response.text)
                             resultados_texto += f"\n\nIMAGEM: {uploaded_file.name}\n" + response.text
                     except Exception as e:
                         st.error(f"Erro na análise de {uploaded_file.name}: {e}")
+                
+                st.session_state['resultado'] = resultados_texto
+        else:
+            st.error("Nenhum modelo de IA disponível para esta chave.")
 
-                # Armazenamento para PDF
-                st.session_state['resultado_vistoria'] = resultados_texto
-
-            # 4. Geração de PDF em Modo Paisagem
-            if 'resultado_vistoria' in st.session_state and st.session_state['resultado_vistoria']:
-                if st.button("📄 Gerar Relatório PDF (Paisagem)"):
-                    try:
-                        pdf = FPDF(orientation='L', unit='mm', format='A4')
-                        pdf.add_page()
-                        pdf.set_font("helvetica", "B", 16)
-                        pdf.cell(0, 10, "Relatório de Vistoria Técnica - Vistor.IA Pro", ln=1, align='C')
-                        pdf.ln(10)
-                        
-                        pdf.set_font("helvetica", size=10)
-                        # Limpeza de caracteres e substituição de emojis para o PDF
-                        texto_limpo = st.session_state['resultado_vistoria'].encode('latin-1', 'replace').decode('latin-1')
-                        texto_pdf = texto_limpo.replace('🟢','[BOM]').replace('🟡','[REGULAR]').replace('🔴','[CRITICO]')
-                        
-                        pdf.multi_cell(0, 5, txt=texto_pdf)
-                        
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                            pdf.output(tmp.name)
-                            with open(tmp.name, "rb") as f:
-                                st.download_button("📥 Baixar Relatório Técnico", 
-                                                 data=f, 
-                                                 file_name="relatorio_vitoria_pro.pdf",
-                                                 mime="application/pdf")
-                    except Exception as pdf_error:
-                        st.error(f"Erro ao gerar PDF: {pdf_error}")
-                        
-    except Exception as config_error:
-        st.error(f"Erro de conexão com a API: {config_error}")
+    except Exception as e:
+        st.error(f"Erro de autenticação ou conexão: {e}")
+        st.info("Verifique se sua chave no AI Studio está ativa.")
 else:
-    st.info("Obtenha sua chave gratuita em: https://aistudio.google.com/app/apikey")
+    st.info("Obtenha sua chave em: https://aistudio.google.com/app/apikey")
