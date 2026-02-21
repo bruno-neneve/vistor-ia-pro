@@ -15,7 +15,7 @@ if api_key:
     try:
         genai.configure(api_key=api_key)
         # Utilizamos o modelo Flash por ser mais estável para chaves novas e mais rápido
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('models/gemini-1.5-flash-latest')
         
         # 3. Interface de Upload
         uploaded_files = st.file_uploader("Arraste ou selecione as fotos da vistoria", 
@@ -68,3 +68,4 @@ if api_key:
         st.error(f"Erro de configuração: {general_error}")
 else:
     st.info("Acesse https://aistudio.google.com/app/apikey para obter sua chave gratuita.")
+
