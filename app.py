@@ -14,8 +14,8 @@ api_key = st.sidebar.text_input("Insira sua Gemini API Key", type="password")
 if api_key:
     genai.configure(api_key=api_key)
     # Recomendado: Gemini 1.5 Pro para análise de patologias
-    model = genai.GenerativeModel('gemini-1.5-pro')
-
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    
     # 3. Interface de Upload
     uploaded_files = st.file_uploader("Arraste ou selecione as fotos da vistoria", 
                                     accept_multiple_files=True, type=['png', 'jpg', 'jpeg'])
@@ -50,4 +50,5 @@ if api_key:
                     st.download_button("Baixar PDF", data=open(tmp.name, "rb"), file_name="relatorio_vistoria.pdf")
 
 else:
+
     st.info("Acesse https://aistudio.google.com/app/apikey para obter sua chave gratuita.")
