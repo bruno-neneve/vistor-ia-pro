@@ -14,10 +14,11 @@ api_key = st.sidebar.text_input("Insira sua Gemini API Key", type="password")
 
 if api_key:
     try:
+        # FORÇAR USO DA API v1 ESTÁVEL (Resolve o erro 404 da v1beta)
+        os.environ["GOOGLE_GENERATIVE_AI_NETWORK_ENDPOINT"] = "generativelanguage.googleapis.com"
         genai.configure(api_key=api_key)
         
-        # Tentativa de inicialização usando o nome estável do modelo
-        # Se o Flash não estiver disponível, o erro será capturado no bloco try/except abaixo
+        # Inicialização do modelo
         model = genai.GenerativeModel('gemini-1.5-flash')
         
         # 3. Interface de Upload
@@ -29,26 +30,26 @@ if api_key:
                 resultados_texto = ""
                 
                 for uploaded_file in uploaded_files:
-                    # Preparação da imagem para processamento
+                    # Preparação da imagem
                     img_pil = Image.open(uploaded_file)
                     st.image(img_pil, width=300, caption=f"Arquivo: {uploaded_file.name}")
                     
-                    # Instrução do Sistema (Lógica de Engenharia Diagnóstica)
+                    # Instrução do Sistema (Lógica de Engenharia)
                     prompt = """Aja como Engenheiro Civil Perito. Identifique o cômodo. 
                     Gere uma tabela Markdown com: Elemento, Material, Estado (🟢, 🟡, 🔴), 
                     Diagnóstico Técnico e Idade Aparente. Determine o Padrão (Baixo/Médio/Alto)."""
                     
-                    # Chamada da API com tratamento de erro multimodal
+                    # Chamada da API com tratamento de erro
                     try:
                         with st.spinner(f"Analisando {uploaded_file.name}..."):
-                            # Envio da imagem para o Gemini 1.5 Flash
+                            # Envio explícito para processamento
                             response = model.generate_content([prompt, img_pil])
                             st.markdown(response.text)
                             resultados_texto += f"\n\nIMAGEM: {uploaded_file.name}\n" + response.text
                     except Exception as e:
                         st.error(f"Erro na análise de {uploaded_file.name}: {e}")
 
-                # Armazenamento seguro dos resultados para exportação
+                # Armazenamento para PDF
                 st.session_state['resultado_vistoria'] = resultados_texto
 
             # 4. Geração de PDF em Modo Paisagem
@@ -62,7 +63,7 @@ if api_key:
                         pdf.ln(10)
                         
                         pdf.set_font("helvetica", size=10)
-                        # Limpeza de caracteres especiais para evitar conflitos no PDF simples
+                        # Limpeza de caracteres e substituição de emojis para o PDF
                         texto_limpo = st.session_state['resultado_vistoria'].encode('latin-1', 'replace').decode('latin-1')
                         texto_pdf = texto_limpo.replace('🟢','[BOM]').replace('🟡','[REGULAR]').replace('🔴','[CRITICO]')
                         
