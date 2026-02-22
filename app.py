@@ -47,7 +47,7 @@ if api_key:
 
             # BOTÃO GERAR ANÁLISE
             if uploaded_files:
-                if st.button("🚀 Gerar Laudo Técnico"):
+                if st.button("🚀 Iniciar análise"):
                     data_hoje = datetime.now().strftime("%d/%m/%Y")
                     st.session_state.header_info = f"**ANÁLISE DE IMAGENS | Vistor.IA Pro**"
                     
@@ -135,4 +135,5 @@ if api_key:
         st.error(f"Ocorreu um erro: {e}")
 else:
     st.info("Insira sua Gemini API Key para começar.")
+
 
