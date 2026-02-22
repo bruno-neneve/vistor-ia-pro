@@ -20,14 +20,21 @@ from reportlab.platypus import (
     TableStyle,
     PageBreak,
 )
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.units import cm
 
 
 APP_TITLE = "VistorIA Pro"
+APP_SUBTITLE = "Desenvolvido por Bruno Leandro Nenevê"
 DEFAULT_MAX_IMAGE_SIDE = 1280
 DEFAULT_JPEG_QUALITY = 85
+
+# Se existir no repo, mostramos no app e colocamos no PDF
+LOGO_PATH = "assets/logo.png"
+
+# Timezone desejado
+TZ_NAME = "America/Sao_Paulo"
 
 
 # -----------------------
@@ -46,30 +53,36 @@ def reset_report():
 
 
 # -----------------------
-# Cache models list
+# Timezone helper
 # -----------------------
-@st.cache_data(show_spinner=False, ttl=3600)
-def cached_list_models(api_key: str):
+def now_local_str():
+    """
+    Tenta usar America/Sao_Paulo. Se não houver tzdata no ambiente, cai para now() local do servidor.
+    """
+    try:
+        from zoneinfo import ZoneInfo  # py3.9+
+        return datetime.now(ZoneInfo(TZ_NAME)).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        # fallback (pode ficar UTC em ambientes cloud)
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+# -----------------------
+# Model discovery (estrutura anterior - evita 404)
+# -----------------------
+def discover_models(api_key: str) -> tuple[list[str], str | None]:
     genai.configure(api_key=api_key)
-    models = []
-    for m in genai.list_models():
-        name = getattr(m, "name", "")
-        if not name:
-            continue
-        # focar nos modelos de geração (gemini)
-        if "gemini" in name.lower():
-            models.append(name)
-    return sorted(set(models))
-
-
-def pick_default_model(model_names: list[str]) -> str:
-    # tenta priorizar flash, depois pro
-    lower = [m.lower() for m in model_names]
-    for key in ["flash", "pro"]:
-        for i, m in enumerate(lower):
-            if key in m:
-                return model_names[i]
-    return model_names[0] if model_names else ""
+    available = [
+        m.name
+        for m in genai.list_models()
+        if hasattr(m, "supported_generation_methods")
+        and m.supported_generation_methods
+        and "generateContent" in m.supported_generation_methods
+    ]
+    # prioridade sugerida por você
+    preferred = ["models/gemini-1.5-flash", "models/gemini-1.5-pro"]
+    target = next((m for m in preferred if m in available), available[0] if available else None)
+    return available, target
 
 
 # -----------------------
@@ -92,10 +105,30 @@ def sha256_bytes(b: bytes) -> str:
 
 
 # -----------------------
+# Status mapping (UI + PDF)
+# -----------------------
+STATUS_MAP = {
+    "verde": ("🟢", "Bom"),
+    "amarelo": ("🟡", "Regular"),
+    "vermelho": ("🔴", "Ruim"),
+    "nao_identificavel": ("⚪", "Não identificável"),
+}
+
+
+def format_status(value: str) -> str:
+    if not value:
+        return ""
+    v = str(value).strip().lower()
+    dot, label = STATUS_MAP.get(v, ("⚪", v))
+    return f"{dot} {label}"
+
+
+# -----------------------
 # Prompt + JSON parsing
 # -----------------------
 def build_prompt() -> str:
-    # Saída estruturada: mais confiável para UI e PDF
+    # mantém o backend em verde/amarelo/vermelho,
+    # mas a UI/PDF converte em Bom/Regular/Ruim com bolinhas.
     return """
 Você é um perito em vistoria visual de imóveis analisando UMA foto.
 
@@ -123,19 +156,13 @@ Regras:
 
 
 def extract_json(text: str):
-    """
-    Tenta extrair JSON mesmo que o modelo envolva com texto extra.
-    Retorna (obj, ok, raw).
-    """
     raw = (text or "").strip()
 
-    # 1) tenta JSON puro
     try:
         return json.loads(raw), True, raw
     except Exception:
         pass
 
-    # 2) tenta achar primeiro bloco {...}
     m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
     if m:
         candidate = m.group(0)
@@ -155,7 +182,6 @@ def analyze_image_with_gemini(api_key: str, model_name: str, image_bytes: bytes)
     model = genai.GenerativeModel(model_name)
 
     prompt = build_prompt()
-    # google-generativeai aceita PIL Image também, mas bytes JPEG tende a ser estável
     pil_img = Image.open(io.BytesIO(image_bytes))
 
     resp = model.generate_content([prompt, pil_img])
@@ -165,10 +191,9 @@ def analyze_image_with_gemini(api_key: str, model_name: str, image_bytes: bytes)
 
 
 # -----------------------
-# PDF (ReportLab)
+# PDF (ReportLab) – melhorado
 # -----------------------
 def safe_p(text: str) -> str:
-    # ReportLab Paragraph é tipo HTML-like; escapar minimamente
     if text is None:
         return ""
     return (
@@ -181,108 +206,155 @@ def safe_p(text: str) -> str:
 
 def build_pdf_bytes(report: dict) -> bytes:
     buf = io.BytesIO()
+
     doc = SimpleDocTemplate(
         buf,
         pagesize=A4,
-        leftMargin=2 * cm,
-        rightMargin=2 * cm,
-        topMargin=1.8 * cm,
-        bottomMargin=1.8 * cm,
+        leftMargin=1.6 * cm,
+        rightMargin=1.6 * cm,
+        topMargin=1.5 * cm,
+        bottomMargin=1.5 * cm,
         title="Relatório de Vistoria",
     )
+
     styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="Small", parent=styles["Normal"], fontSize=9, leading=11))
+    styles.add(ParagraphStyle(name="Tiny", parent=styles["Normal"], fontSize=8, leading=10))
+    styles.add(ParagraphStyle(name="H1", parent=styles["Title"], fontSize=18, leading=22))
+    styles.add(ParagraphStyle(name="H2", parent=styles["Heading2"], fontSize=14, leading=18))
+    styles.add(ParagraphStyle(name="H3", parent=styles["Heading3"], fontSize=11, leading=14))
+
     story = []
 
     header = report.get("header", {})
     meta = report.get("meta", {})
+    items = report.get("items", [])
+    summary = report.get("summary", {})
 
-    story.append(Paragraph("Relatório de Vistoria (IA)", styles["Title"]))
-    story.append(Spacer(1, 10))
+    # Logo (se existir)
+    if exists_file(LOGO_PATH):
+        try:
+            rl_logo = RLImage(LOGO_PATH)
+            rl_logo.drawHeight = 1.2 * cm
+            rl_logo.drawWidth = 1.2 * cm
+            story.append(rl_logo)
+            story.append(Spacer(1, 6))
+        except Exception:
+            pass
 
-    story.append(Paragraph(f"<b>Gerado em:</b> {safe_p(meta.get('generated_at', ''))}", styles["Normal"]))
-    story.append(Paragraph(f"<b>Modelo:</b> {safe_p(meta.get('model', ''))}", styles["Normal"]))
-    story.append(Paragraph(f"<b>Fotos analisadas:</b> {safe_p(str(meta.get('n_images', '')))}", styles["Normal"]))
-    story.append(Spacer(1, 10))
+    story.append(Paragraph("Relatório de Vistoria (IA)", styles["H1"]))
+    story.append(Spacer(1, 8))
+
+    story.append(Paragraph(f"<b>Gerado em:</b> {safe_p(meta.get('generated_at', ''))}", styles["Small"]))
+    story.append(Paragraph(f"<b>Modelo:</b> {safe_p(meta.get('model', ''))}", styles["Small"]))
+    story.append(Paragraph(f"<b>Fotos analisadas:</b> {safe_p(str(meta.get('n_images', '')))}", styles["Small"]))
+    if meta.get("elapsed_s") is not None:
+        story.append(Paragraph(f"<b>Tempo total:</b> {safe_p(str(meta.get('elapsed_s')))}s", styles["Small"]))
+    story.append(Spacer(1, 8))
 
     if header.get("cliente"):
-        story.append(Paragraph(f"<b>Cliente:</b> {safe_p(header.get('cliente'))}", styles["Normal"]))
+        story.append(Paragraph(f"<b>Cliente:</b> {safe_p(header.get('cliente'))}", styles["Small"]))
     if header.get("endereco"):
-        story.append(Paragraph(f"<b>Endereço:</b> {safe_p(header.get('endereco'))}", styles["Normal"]))
-    story.append(Spacer(1, 12))
+        story.append(Paragraph(f"<b>Endereço:</b> {safe_p(header.get('endereco'))}", styles["Small"]))
+    story.append(Spacer(1, 10))
 
-    # Seção por foto
-    for idx, item in enumerate(report.get("items", []), start=1):
-        story.append(Paragraph(f"<b>Foto {idx}:</b> {safe_p(item.get('filename', ''))}", styles["Heading3"]))
+    # Larguras de coluna proporcionais ao conteúdo (evita “brancaverde” colado)
+    usable_w = A4[0] - doc.leftMargin - doc.rightMargin
+    col_elemento = usable_w * 0.20
+    col_material = usable_w * 0.33
+    col_estado = usable_w * 0.14
+    col_obs = usable_w * 0.33
+
+    def P(text, style="Tiny"):
+        return Paragraph(safe_p(text), styles[style])
+
+    for idx, item in enumerate(items, start=1):
+        story.append(Paragraph(f"Foto {idx}: {safe_p(item.get('filename', ''))}", styles["H3"]))
         story.append(Spacer(1, 6))
 
-        # imagem
         img_bytes = item.get("image_bytes")
         if img_bytes:
             img_io = io.BytesIO(img_bytes)
             rl_img = RLImage(img_io)
-            rl_img.drawHeight = 7.0 * cm
-            rl_img.drawWidth = 12.0 * cm
+            # largura boa sem estourar
+            rl_img.drawWidth = usable_w
+            rl_img.drawHeight = (usable_w * 9) / 16  # aproximação
             story.append(rl_img)
-            story.append(Spacer(1, 10))
-
-        # tabela de itens (se parse ok)
-        if item.get("parse_ok") and isinstance(item.get("json"), dict):
-            data = item["json"]
-            comodo = data.get("comodo_ou_area", "")
-            obs = data.get("observacoes_gerais", "")
-            conf = data.get("confianca", None)
-
-            story.append(Paragraph(f"<b>Cômodo/Área:</b> {safe_p(comodo)}", styles["Normal"]))
-            if conf is not None:
-                story.append(Paragraph(f"<b>Confiança:</b> {safe_p(conf)}", styles["Normal"]))
-            if obs:
-                story.append(Paragraph(f"<b>Observações gerais:</b> {safe_p(obs)}", styles["Normal"]))
             story.append(Spacer(1, 8))
 
+        if item.get("parse_ok") and isinstance(item.get("json"), dict):
+            data = item["json"]
+            comodo = str(data.get("comodo_ou_area", "") or "")
+            obs = str(data.get("observacoes_gerais", "") or "")
+            conf = data.get("confianca", None)
+
+            story.append(P(f"<b>Cômodo/Área:</b> {comodo}", "Small"))
+            if conf is not None:
+                story.append(P(f"<b>Confiança:</b> {conf}", "Small"))
+            if obs:
+                story.append(P(f"<b>Observações gerais:</b> {obs}", "Small"))
+            story.append(Spacer(1, 6))
+
             itens = data.get("itens", []) or []
-            table_data = [["Elemento", "Material/Acabamento", "Estado", "Patologias/Obs"]]
+            table_data = [
+                [P("Elemento", "Small"), P("Material/Acabamento", "Small"), P("Estado", "Small"), P("Patologias/Obs", "Small")]
+            ]
+
             for it in itens:
                 patologias = it.get("patologias_ou_observacoes", [])
                 if isinstance(patologias, list):
                     patologias_txt = "; ".join([str(p) for p in patologias if p])
                 else:
                     patologias_txt = str(patologias) if patologias else ""
+
+                estado_fmt = format_status(it.get("estado_conservacao", ""))
+
                 table_data.append([
-                    safe_p(it.get("elemento", "")),
-                    safe_p(it.get("material_acabamento", "")),
-                    safe_p(it.get("estado_conservacao", "")),
-                    safe_p(patologias_txt),
+                    P(str(it.get("elemento", "") or "")),
+                    P(str(it.get("material_acabamento", "") or "")),
+                    P(estado_fmt),
+                    P(patologias_txt),
                 ])
 
-            tbl = Table(table_data, colWidths=[4.0*cm, 4.2*cm, 2.6*cm, 6.0*cm])
+            tbl = Table(
+                table_data,
+                colWidths=[col_elemento, col_material, col_estado, col_obs],
+                repeatRows=1
+            )
             tbl.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EFEFEF")),
                 ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, -1), 9),
-                ("BOTTOMPADDING", (0, 0), (-1, 0), 6),
-                ("TOPPADDING", (0, 0), (-1, 0), 6),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
             ]))
             story.append(tbl)
         else:
-            # fallback: imprime texto bruto
-            story.append(Paragraph("<b>Falha ao estruturar JSON.</b> Abaixo, retorno bruto:", styles["Normal"]))
-            story.append(Spacer(1, 6))
-            raw = safe_p(item.get("raw_text", ""))
-            story.append(Paragraph(raw[:2500], styles["Code"]))
+            story.append(P("<b>Falha ao estruturar JSON.</b> Retorno bruto:", "Small"))
+            story.append(Spacer(1, 4))
+            raw = item.get("raw_text", "") or ""
+            story.append(P(raw[:3000], "Tiny"))
 
-        story.append(PageBreak())
+        if idx < len(items):
+            story.append(PageBreak())
 
-    # Resumo
-    summary = report.get("summary", {})
-    story.append(Paragraph("Resumo Geral", styles["Heading2"]))
-    story.append(Spacer(1, 8))
-    story.append(Paragraph(safe_p(summary.get("text", "")), styles["Normal"]))
+    story.append(PageBreak())
+    story.append(Paragraph("Resumo Geral", styles["H2"]))
+    story.append(Spacer(1, 6))
+    story.append(P(summary.get("text", "") or "", "Small"))
 
     doc.build(story)
     return buf.getvalue()
+
+
+def exists_file(path: str) -> bool:
+    try:
+        import os
+        return os.path.exists(path) and os.path.isfile(path)
+    except Exception:
+        return False
 
 
 # -----------------------
@@ -294,6 +366,7 @@ def render_report(report: dict):
     summary = report.get("summary", {})
 
     st.subheader("Relatório")
+
     cols = st.columns(3)
     cols[0].metric("Fotos", meta.get("n_images", 0))
     cols[1].metric("Modelo", meta.get("model", "-"))
@@ -316,11 +389,11 @@ def render_report(report: dict):
             data = item["json"]
             st.write(f"**Cômodo/Área:** {data.get('comodo_ou_area','')}")
             st.write(f"**Confiança:** {data.get('confianca','')}")
-            st.write(f"**Observações gerais:** {data.get('observacoes_gerais','')}")
+            if data.get("observacoes_gerais"):
+                st.write(f"**Observações gerais:** {data.get('observacoes_gerais','')}")
 
             itens = data.get("itens", []) or []
             if itens:
-                # tabela no app
                 table_rows = []
                 for it in itens:
                     patologias = it.get("patologias_ou_observacoes", [])
@@ -328,10 +401,11 @@ def render_report(report: dict):
                         patologias_txt = "; ".join([str(p) for p in patologias if p])
                     else:
                         patologias_txt = str(patologias) if patologias else ""
+
                     table_rows.append({
                         "Elemento": it.get("elemento", ""),
                         "Material/Acabamento": it.get("material_acabamento", ""),
-                        "Estado": it.get("estado_conservacao", ""),
+                        "Estado": format_status(it.get("estado_conservacao", "")),
                         "Patologias/Obs": patologias_txt,
                     })
                 st.dataframe(table_rows, use_container_width=True)
@@ -349,8 +423,15 @@ def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     ensure_state()
 
-    st.title(APP_TITLE)
-    st.caption("Análise de fotos de vistoria com Gemini + geração de relatório e PDF.")
+    # Topo: título + autor + logo (se existir)
+    cols_top = st.columns([1, 8])
+    with cols_top[0]:
+        if exists_file(LOGO_PATH):
+            st.image(LOGO_PATH, width=64)
+    with cols_top[1]:
+        st.title(APP_TITLE)
+        st.caption(APP_SUBTITLE)
+        st.caption("Análise de fotos de vistoria com Gemini + geração de relatório e PDF (ReportLab).")
 
     with st.sidebar:
         st.header("Configurações")
@@ -366,33 +447,36 @@ def main():
             submitted = st.form_submit_button("Salvar configurações")
 
         st.divider()
-        if st.button("🧹 Limpar laudo / Novo", type="secondary"):
+        if st.button("🧹 Limpar", type="secondary"):
             reset_report()
             st.rerun()
 
-    # Upload
     uploaded_files = st.file_uploader(
-        "Envie as fotos da vistoria (JPG/PNG)",
+        "Selecione as fotos",
         type=["jpg", "jpeg", "png"],
         accept_multiple_files=True,
     )
 
-    # Model selection
-    model_name = ""
+    # Descoberta + seleção do modelo (estrutura anterior)
+    model_name = None
+    available_models = []
     if api_key:
         try:
-            models = cached_list_models(api_key)
-            if models:
-                model_name = st.selectbox("Modelo Gemini", options=models, index=models.index(pick_default_model(models)))
+            available_models, target_model = discover_models(api_key)
+            if available_models:
+                # deixa selecionar manualmente (e o target entra como default)
+                default_index = available_models.index(target_model) if target_model in available_models else 0
+                model_name = st.selectbox("Modelo Gemini", options=available_models, index=default_index)
             else:
-                st.warning("Nenhum modelo Gemini encontrado para esta chave.")
+                st.warning("Nenhum modelo compatível com generateContent foi encontrado para esta chave.")
         except Exception as e:
             st.error(f"Falha ao listar modelos: {e}")
 
-    # Botão de análise
-    colA, colB = st.columns([1, 3])
-    with colA:
-        run = st.button("🚀 Gerar Laudo Técnico", type="primary", disabled=(not api_key or not model_name or not uploaded_files))
+    run = st.button(
+        "🚀 Iniciar análise",
+        type="primary",
+        disabled=(not api_key or not model_name or not uploaded_files),
+    )
 
     if run:
         st.session_state.analise_pronta = False
@@ -416,7 +500,7 @@ def main():
 
                 items.append({
                     "filename": uf.name,
-                    "image_bytes": img_bytes,   # usado para re-render e PDF
+                    "image_bytes": img_bytes,
                     "image_hash": img_hash,
                     "json": obj,
                     "parse_ok": ok,
@@ -435,19 +519,18 @@ def main():
 
             progress.progress(i / max(len(uploaded_files), 1))
 
-        # Resumo geral (pede ao Gemini um resumo a partir dos JSONs)
+        # Resumo geral
         summary_text = ""
         try:
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel(model_name)
 
-            # monta um contexto compacto
             compact = []
             for it in items:
                 if it["parse_ok"] and isinstance(it["json"], dict):
                     compact.append(it["json"])
                 else:
-                    compact.append({"erro": True, "raw": it.get("raw_text", "")[:500]})
+                    compact.append({"erro": True, "raw": (it.get("raw_text", "") or "")[:500]})
 
             resumo_prompt = """
 Você receberá um conjunto de análises (estruturadas em JSON ou fallback).
@@ -472,10 +555,11 @@ Retorne APENAS texto (sem JSON).
                 "endereco": endereco.strip(),
             },
             "meta": {
-                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "generated_at": now_local_str(),
                 "model": model_name,
                 "n_images": len(items),
                 "elapsed_s": round(ended - started, 2),
+                "timezone": TZ_NAME,
             },
             "items": items,
             "summary": {"text": summary_text},
@@ -483,13 +567,12 @@ Retorne APENAS texto (sem JSON).
 
         st.session_state.report = report
         st.session_state.analise_pronta = True
-        status.success("Laudo gerado com sucesso!")
+        status.success("Análise concluída com sucesso!")
 
-    # Sempre renderiza se pronto (resolve o “apagão”)
+    # Sempre renderiza se pronto (evita “apagão”)
     if st.session_state.analise_pronta and st.session_state.report:
         render_report(st.session_state.report)
 
-        # PDF em bytes (sem arquivo temporário)
         try:
             pdf_bytes = build_pdf_bytes(st.session_state.report)
             st.download_button(
