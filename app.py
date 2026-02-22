@@ -31,8 +31,6 @@ with col2:
 
 # Dados na Sidebar
 st.sidebar.header("📋 Dados da Inspeção")
-nome_cliente = st.sidebar.text_input("Nome do Cliente", "IPOS")
-endereco_imovel = st.sidebar.text_input("Endereço do Imóvel", "Exemplo, 1")
 api_key = st.sidebar.text_input("Gemini API Key", type="password")
 
 if api_key:
@@ -51,7 +49,7 @@ if api_key:
             if uploaded_files:
                 if st.button("🚀 Gerar Laudo Técnico"):
                     data_hoje = datetime.now().strftime("%d/%m/%Y")
-                    st.session_state.header_info = f"**INSPEÇÃO VISUAL PRELIMINAR** | {data_hoje}\n\n**Cliente:** {nome_cliente} | **Endereço:** {endereco_imovel}"
+                    st.session_state.header_info = f"**ANÁLISE DE IMAGENS | Vistor.IA Pro**"
                     
                     full_content = ""
                     
@@ -127,7 +125,7 @@ if api_key:
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                     pdf.output(tmp.name)
                     st.download_button(
-                        label="📄 Baixar Relatório PDF Profissional",
+                        label="📄 Baixar Relatório em PDF",
                         data=open(tmp.name, "rb"),
                         file_name=f"Laudo_{nome_cliente}.pdf",
                         mime="application/pdf"
@@ -137,3 +135,4 @@ if api_key:
         st.error(f"Ocorreu um erro: {e}")
 else:
     st.info("Insira sua Gemini API Key para começar.")
+
