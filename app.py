@@ -114,7 +114,7 @@ if api_key:
                 pdf.multi_cell(0, 5, txt=texto_pdf.encode('latin-1', 'replace').decode('latin-1'))
                 pdf.ln(10)
                 pdf.set_font("Arial", "B", 11)
-                pdf.cell(0, 10, "RESUMO GERAL DO IMÓVEL:", ln=1)
+                pdf.cell(0, 10, "RESUMO GERAL:", ln=1)
                 pdf.set_font("Arial", size=10)
                 pdf.multi_cell(0, 5, txt=texto_resumo.encode('latin-1', 'replace').decode('latin-1'))
                 
@@ -135,5 +135,6 @@ if api_key:
         st.error(f"Ocorreu um erro: {e}")
 else:
     st.info("Insira sua Gemini API Key para começar.")
+
 
 
