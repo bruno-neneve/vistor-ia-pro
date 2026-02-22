@@ -31,9 +31,9 @@ APP_SUBTITLE = "Desenvolvido por Bruno Leandro Nenevê"
 DEFAULT_MAX_IMAGE_SIDE = 1280
 DEFAULT_JPEG_QUALITY = 85
 
-# LOGO: prioridade é raiz do repo como você descreveu
+# LOGO: prioridade é raiz do repo
 LOGO_PATH = "logo.png"
-LOGO_FALLBACK = "assets/logo.png"  # opcional se você quiser usar no futuro
+LOGO_FALLBACK = "assets/logo.png"  # opcional
 
 TZ_NAME = "America/Sao_Paulo"
 
@@ -73,7 +73,7 @@ def reset_report():
 
 
 # -----------------------
-# Timezone helper
+# Time helper
 # -----------------------
 def now_local_str():
     """
@@ -129,31 +129,51 @@ def sha256_bytes(b: bytes) -> str:
 # -----------------------
 # Status mapping (UI + PDF)
 # -----------------------
-STATUS_MAP = {
-    "verde": ("🟢", "Bom", colors.HexColor("#DCFCE7")),         # green-100
-    "amarelo": ("🟡", "Regular", colors.HexColor("#FEF9C3")),   # yellow-100
-    "vermelho": ("🔴", "Ruim", colors.HexColor("#FEE2E2")),     # red-100
-    "nao_identificavel": ("⚪", "Não identificável", colors.HexColor("#F3F4F6")),  # gray-100
+# UI pode ter emoji. PDF não (vamos usar somente texto + cor).
+STATUS_LABEL = {
+    "verde": "Bom",
+    "amarelo": "Regular",
+    "vermelho": "Ruim",
+    "nao_identificavel": "Não identificável",
+}
+STATUS_BG = {
+    "verde": colors.HexColor("#DCFCE7"),            # green-100
+    "amarelo": colors.HexColor("#FEF9C3"),          # yellow-100
+    "vermelho": colors.HexColor("#FEE2E2"),          # red-100
+    "nao_identificavel": colors.HexColor("#F3F4F6")  # gray-100
 }
 
 
-def format_status(value: str) -> str:
-    if not value:
-        return ""
-    v = str(value).strip().lower()
-    dot, label, _bg = STATUS_MAP.get(v, ("⚪", v, colors.HexColor("#F3F4F6")))
-    return f"{dot} {label}"
+def format_status_ui(value: str) -> str:
+    """UI: emoji + texto"""
+    v = (value or "").strip().lower()
+    if v == "verde":
+        return "🟢 Bom"
+    if v == "amarelo":
+        return "🟡 Regular"
+    if v == "vermelho":
+        return "🔴 Ruim"
+    if v == "nao_identificavel":
+        return "⚪ Não identificável"
+    return v
+
+
+def format_status_pdf(value: str) -> str:
+    """PDF: só texto (sem emoji)"""
+    v = (value or "").strip().lower()
+    return STATUS_LABEL.get(v, v)
 
 
 def status_bg(value: str):
     v = (value or "").strip().lower()
-    return STATUS_MAP.get(v, ("", "", colors.HexColor("#F3F4F6")))[2]
+    return STATUS_BG.get(v, colors.HexColor("#F3F4F6"))
 
 
 # -----------------------
 # Prompt + JSON parsing
 # -----------------------
 def build_prompt() -> str:
+    # IMPORTANTE: limite 8 itens e prioridade (paredes/piso/teto/esquadrias)
     return """
 Você é um perito em vistoria visual de imóveis analisando UMA foto.
 
@@ -163,7 +183,7 @@ Retorne APENAS um JSON válido (sem markdown, sem texto fora do JSON), com este 
   "comodo_ou_area": "string (ex: sala, cozinha, fachada, banheiro, garagem, área externa...)",
   "itens": [
     {
-      "elemento": "string (ex: parede, piso, teto, janela, porta, bancada, revestimento...)",
+      "elemento": "string (ex: parede, piso, teto, janela, porta, esquadria, bancada, revestimento...)",
       "material_acabamento": "string ou null",
       "estado_conservacao": "verde|amarelo|vermelho|nao_identificavel",
       "patologias_ou_observacoes": ["string", "..."]
@@ -174,9 +194,11 @@ Retorne APENAS um JSON válido (sem markdown, sem texto fora do JSON), com este 
 }
 
 Regras:
+- Retorne no MÁXIMO 8 itens em "itens". Priorize os mais relevantes.
+- Sempre inclua (quando existirem na foto): PAREDE(S), PISO, TETO e ESQUADRIAS (porta/janela).
 - Se não der para identificar com segurança, use "nao_identificavel" e/ou null.
 - "confianca" deve ser um número entre 0 e 1.
-- Seja objetivo e técnico, sem inventar.
+- Seja objetivo e técnico. Não invente.
 """.strip()
 
 
@@ -201,9 +223,72 @@ def extract_json(text: str):
     return None, False, raw
 
 
+def prioritize_items(items: list[dict]) -> list[dict]:
+    """
+    Mantém no máximo 8 itens e prioriza sempre (quando existirem):
+    parede(s), piso, teto, esquadrias.
+    Depois completa com os demais.
+    """
+    if not isinstance(items, list):
+        return []
+
+    def norm(s: str) -> str:
+        return (s or "").strip().lower()
+
+    priority_keywords = [
+        ("parede", ["parede"]),
+        ("piso", ["piso", "chao", "chão"]),
+        ("teto", ["teto", "forro", "laje"]),
+        ("esquadrias", ["porta", "janela", "esquadria", "caixilho", "vitro", "vidro"]),
+    ]
+
+    chosen = []
+    chosen_idx = set()
+
+    # 1) pega 1+ ocorrências por prioridade (ex.: várias paredes podem entrar)
+    for _name, keys in priority_keywords:
+        for i, it in enumerate(items):
+            el = norm(str(it.get("elemento", "")))
+            if any(k in el for k in keys):
+                if i not in chosen_idx:
+                    chosen.append(it)
+                    chosen_idx.add(i)
+
+    # 2) completa com restantes na ordem original
+    for i, it in enumerate(items):
+        if i in chosen_idx:
+            continue
+        chosen.append(it)
+        chosen_idx.add(i)
+        if len(chosen) >= 8:
+            break
+
+    return chosen[:8]
+
+
 # -----------------------
-# Gemini call
+# Gemini call + Auto-repair JSON
 # -----------------------
+def repair_json_with_gemini(api_key: str, model_name: str, raw_text: str) -> str:
+    """
+    Pede ao Gemini para corrigir o JSON SEM mudar conteúdo.
+    Retorna texto (idealmente JSON puro).
+    """
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(model_name)
+
+    repair_prompt = """
+Você receberá um conteúdo que DEVERIA ser JSON, mas está inválido.
+Sua tarefa: corrigir para ficar 100% JSON válido, SEM alterar o conteúdo (apenas correções de sintaxe).
+- Não invente novos campos.
+- Não remova informações; apenas corrija vírgulas, aspas e chaves.
+- Retorne APENAS o JSON válido (nada de markdown, nada de texto fora).
+""".strip()
+
+    resp = model.generate_content([repair_prompt, raw_text])
+    return (getattr(resp, "text", "") or "").strip()
+
+
 def analyze_image_with_gemini(api_key: str, model_name: str, image_bytes: bytes) -> tuple[dict | None, bool, str]:
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(model_name)
@@ -213,12 +298,32 @@ def analyze_image_with_gemini(api_key: str, model_name: str, image_bytes: bytes)
 
     resp = model.generate_content([prompt, pil_img])
     text = getattr(resp, "text", "") or ""
+
     obj, ok, raw = extract_json(text)
+
+    # AUTO-REPARO: se falhou, tenta 2ª chamada pedindo correção do JSON
+    if not ok and raw:
+        try:
+            fixed = repair_json_with_gemini(api_key, model_name, raw)
+            obj2, ok2, _raw2 = extract_json(fixed)
+            if ok2:
+                obj = obj2
+                ok = True
+                raw = fixed  # guarda o JSON corrigido
+        except Exception:
+            pass
+
+    # pós-processamento: limitar / priorizar itens
+    if ok and isinstance(obj, dict):
+        itens = obj.get("itens", [])
+        if isinstance(itens, list):
+            obj["itens"] = prioritize_items(itens)
+
     return obj, ok, raw
 
 
 # -----------------------
-# PDF (ReportLab) – Moderno/Clean (3B)
+# PDF (ReportLab) – Moderno/Clean
 # -----------------------
 def safe_p(text: str) -> str:
     if text is None:
@@ -234,21 +339,24 @@ def safe_p(text: str) -> str:
 def strip_md(s: str) -> str:
     if not s:
         return ""
-    # remove **bold** simples
-    s = re.sub(r"\*\*(.*?)\*\*", r"\1", s)
+    s = re.sub(r"\*\*(.*?)\*\*", r"\1", s)  # remove **bold**
+    s = re.sub(r"^\s*[\*\-]\s+", "", s, flags=re.MULTILINE)  # remove bullets simples no começo
     return s.strip()
 
 
 def split_summary_sections(text: str) -> list[tuple[str, str]]:
     """
-    Tenta quebrar o resumo em blocos. Funciona mesmo se vier como texto corrido.
-    Retorna lista de (titulo, conteudo).
+    Quebra resumo em blocos mais confiáveis.
+    Detecta títulos mesmo sem ':' e organiza o conteúdo.
     """
-    t = strip_md(text or "")
+    t = (text or "").strip()
     if not t:
         return []
 
-    # Heurísticas comuns no seu resumo
+    # normaliza para ajudar na detecção
+    # mantemos o texto original para conteúdo, mas fazemos uma cópia para localizar títulos
+    t_plain = strip_md(t)
+
     keys = [
         "Principais Achados",
         "Pontos de Atenção",
@@ -256,43 +364,64 @@ def split_summary_sections(text: str) -> list[tuple[str, str]]:
         "Limitações",
     ]
 
-    # marca posições
     positions = []
     for k in keys:
-        m = re.search(rf"{re.escape(k)}\s*:?", t, flags=re.IGNORECASE)
+        # aceita "Principais Achados" com ou sem ":" e com variação de maiúsculas
+        m = re.search(rf"(^|\n)\s*{re.escape(k)}\s*:?\s*(\n|$)", t_plain, flags=re.IGNORECASE)
         if m:
             positions.append((m.start(), k))
 
     if not positions:
-        return [("Resumo Geral", t)]
+        return [("Resumo Geral", t_plain)]
 
     positions.sort()
     sections = []
-    for i, (start, key) in enumerate(positions):
-        end = positions[i + 1][0] if i + 1 < len(positions) else len(t)
-        block = t[start:end].strip()
-        # remove o título do começo do bloco
-        block = re.sub(rf"^{re.escape(key)}\s*:?\s*", "", block, flags=re.IGNORECASE).strip()
-        sections.append((key, block))
 
-    # Se tiver texto antes do primeiro título, guarda como introdução
     first_start = positions[0][0]
-    intro = t[:first_start].strip()
+    intro = t_plain[:first_start].strip()
     if intro:
-        sections.insert(0, ("Resumo Geral", intro))
+        sections.append(("Resumo Geral", intro))
+
+    for i, (start, key) in enumerate(positions):
+        end = positions[i + 1][0] if i + 1 < len(positions) else len(t_plain)
+        block = t_plain[start:end].strip()
+        block = re.sub(rf"(^|\n)\s*{re.escape(key)}\s*:?\s*", "", block, flags=re.IGNORECASE).strip()
+        sections.append((key, block))
 
     return sections
 
 
+def split_lines_as_paragraphs(block: str) -> list[str]:
+    """
+    Converte bloco em parágrafos melhores:
+    - preserva itens numerados "1." como linhas
+    - separa por quebras de linha fortes
+    """
+    b = (block or "").strip()
+    if not b:
+        return []
+
+    # normaliza quebras
+    b = re.sub(r"\r\n", "\n", b)
+    # separa por blocos vazios
+    chunks = [c.strip() for c in re.split(r"\n\s*\n", b) if c.strip()]
+    out = []
+    for c in chunks:
+        # se parecer lista numerada, mantém linhas separadas
+        lines = [ln.strip() for ln in c.split("\n") if ln.strip()]
+        if any(re.match(r"^\d+\.\s+", ln) for ln in lines):
+            out.extend(lines)
+        else:
+            # junta linhas quebradas artificialmente
+            out.append(" ".join(lines))
+    return out
+
+
 def fit_image_preserve_aspect(img_bytes: bytes, max_w: float, max_h: float) -> RLImage:
-    """
-    Cria RLImage mantendo proporção, limitado por max_w e max_h.
-    """
     pil = Image.open(io.BytesIO(img_bytes))
     w_px, h_px = pil.size
     aspect = h_px / max(w_px, 1)
 
-    # tenta usar toda a largura e ajusta altura
     w = max_w
     h = w * aspect
     if h > max_h:
@@ -324,7 +453,6 @@ def build_pdf_bytes(report: dict) -> bytes:
     styles.add(ParagraphStyle(name="H1", parent=styles["Title"], fontSize=18, leading=22, spaceAfter=6))
     styles.add(ParagraphStyle(name="H2", parent=styles["Heading2"], fontSize=13.5, leading=18, spaceBefore=6, spaceAfter=6))
     styles.add(ParagraphStyle(name="H3", parent=styles["Heading3"], fontSize=11, leading=14, spaceBefore=6, spaceAfter=6))
-    styles.add(ParagraphStyle(name="Muted", parent=styles["Normal"], textColor=colors.HexColor("#6B7280"), fontSize=9, leading=11))
 
     header = report.get("header", {})
     meta = report.get("meta", {})
@@ -333,10 +461,8 @@ def build_pdf_bytes(report: dict) -> bytes:
 
     logo_path = get_logo_path()
 
-    # Header / Footer callbacks
     def draw_header_footer(canvas, _doc):
         canvas.saveState()
-
         # header line
         canvas.setStrokeColor(colors.HexColor("#E5E7EB"))
         canvas.setLineWidth(1)
@@ -351,12 +477,11 @@ def build_pdf_bytes(report: dict) -> bytes:
         canvas.setFillColor(colors.HexColor("#6B7280"))
         canvas.drawString(doc.leftMargin, y, footer_left)
         canvas.drawRightString(A4[0] - doc.rightMargin, y, footer_right)
-
         canvas.restoreState()
 
     story = []
 
-    # --- Top header block (logo + title + metadata)
+    # --- Header (logo + title)
     top_table = []
     if logo_path:
         try:
@@ -379,13 +504,12 @@ def build_pdf_bytes(report: dict) -> bytes:
     ]))
     story.append(t)
 
-    # metadata “cards”
+    # metadata “card” — REMOVIDO: FUSO
     meta_rows = [
         ["Gerado em", safe_p(meta.get("generated_at", ""))],
         ["Modelo", safe_p(meta.get("model", ""))],
         ["Fotos", str(meta.get("n_images", ""))],
         ["Tempo", f"{meta.get('elapsed_s', '')}s" if meta.get("elapsed_s") is not None else ""],
-        ["Fuso", safe_p(meta.get("timezone", TZ_NAME))],
     ]
     if header.get("cliente"):
         meta_rows.append(["Cliente", safe_p(header.get("cliente"))])
@@ -411,7 +535,6 @@ def build_pdf_bytes(report: dict) -> bytes:
 
     usable_w = A4[0] - doc.leftMargin - doc.rightMargin
 
-    # col widths: moderno e legível
     col_elemento = usable_w * 0.20
     col_material = usable_w * 0.33
     col_estado = usable_w * 0.14
@@ -426,7 +549,6 @@ def build_pdf_bytes(report: dict) -> bytes:
 
         img_bytes = item.get("image_bytes")
         if img_bytes:
-            # preserva proporção e limita altura (para não “estourar” página)
             max_h = 9.0 * cm
             rl_img = fit_image_preserve_aspect(img_bytes, max_w=usable_w, max_h=max_h)
             story.append(rl_img)
@@ -438,7 +560,6 @@ def build_pdf_bytes(report: dict) -> bytes:
             obs = str(data.get("observacoes_gerais", "") or "")
             conf = data.get("confianca", None)
 
-            # “chips” de info
             info_line = f"<b>Cômodo/Área:</b> {safe_p(comodo)}"
             if conf is not None:
                 info_line += f" &nbsp;&nbsp; <b>Confiança:</b> {safe_p(conf)}"
@@ -448,9 +569,13 @@ def build_pdf_bytes(report: dict) -> bytes:
             story.append(Spacer(1, 6))
 
             itens = data.get("itens", []) or []
-            table_data = [[P("Elemento", "Small"), P("Material/Acabamento", "Small"), P("Estado", "Small"), P("Patologias/Obs", "Small")]]
+            table_data = [[
+                P("Elemento", "Small"),
+                P("Material/Acabamento", "Small"),
+                P("Estado", "Small"),
+                P("Patologias/Obs", "Small")
+            ]]
 
-            # TableStyle com zebra + background por status
             ts = [
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F3F4F6")),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#111827")),
@@ -472,12 +597,12 @@ def build_pdf_bytes(report: dict) -> bytes:
                     patologias_txt = str(patologias) if patologias else ""
 
                 estado_raw = it.get("estado_conservacao", "")
-                estado_fmt = format_status(estado_raw)
+                estado_txt = format_status_pdf(estado_raw)  # PDF: texto puro
 
                 table_data.append([
                     P(str(it.get("elemento", "") or "")),
                     P(str(it.get("material_acabamento", "") or "")),
-                    P(estado_fmt),
+                    P(estado_txt),
                     P(patologias_txt),
                 ])
 
@@ -500,27 +625,35 @@ def build_pdf_bytes(report: dict) -> bytes:
             story.append(Paragraph("<b>Falha ao estruturar JSON.</b> Retorno bruto:", styles["Small"]))
             story.append(Spacer(1, 4))
             raw = item.get("raw_text", "") or ""
-            story.append(Paragraph(safe_p(raw[:3000]), styles["Tiny"]))
+            story.append(Paragraph(safe_p(raw[:1200]), styles["Tiny"]))
+            story.append(Spacer(1, 4))
+            story.append(Paragraph("Sugestão: reprocessar esta foto (o modelo retornou JSON inválido).", styles["Tiny"]))
 
         if idx < len(items):
             story.append(PageBreak())
 
-    # Resumo com blocos
+    # Resumo com blocos e formatação melhor
     story.append(PageBreak())
     story.append(Paragraph("Resumo Geral", styles["H2"]))
     story.append(Spacer(1, 4))
 
     sections = split_summary_sections(summary.get("text", "") or "")
+    if not sections:
+        sections = [("Resumo Geral", strip_md(summary.get("text", "") or ""))]
+
     for title, content in sections:
         if title != "Resumo Geral":
             story.append(Paragraph(title, styles["H3"]))
-        # quebra em parágrafos simples
-        content = strip_md(content)
-        # separa linhas vazias em parágrafos
-        parts = [p.strip() for p in re.split(r"\n\s*\n", content) if p.strip()]
-        for p in parts:
-            story.append(Paragraph(safe_p(p), styles["Small"]))
+
+        paragraphs = split_lines_as_paragraphs(content)
+        for p in paragraphs:
+            # mantém numeração quando existir
+            if re.match(r"^\d+\.\s+", p):
+                story.append(Paragraph(safe_p(p), styles["Small"]))
+            else:
+                story.append(Paragraph(safe_p(p), styles["Small"]))
             story.append(Spacer(1, 4))
+
         story.append(Spacer(1, 6))
 
     doc.build(story, onFirstPage=draw_header_footer, onLaterPages=draw_header_footer)
@@ -575,12 +708,12 @@ def render_report(report: dict):
                     table_rows.append({
                         "Elemento": it.get("elemento", ""),
                         "Material/Acabamento": it.get("material_acabamento", ""),
-                        "Estado": format_status(it.get("estado_conservacao", "")),
+                        "Estado": format_status_ui(it.get("estado_conservacao", "")),
                         "Patologias/Obs": patologias_txt,
                     })
                 st.dataframe(table_rows, use_container_width=True)
         else:
-            st.warning("Não foi possível estruturar a resposta em JSON. Exibindo retorno bruto.")
+            st.warning("Não foi possível estruturar a resposta em JSON. Tentamos auto-reparo, mas não resolveu.")
             st.code(item.get("raw_text", ""), language="text")
 
         st.divider()
@@ -593,7 +726,7 @@ def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     ensure_state()
 
-    # ---- CSS (3A: tirar vermelho, deixar clean/azul)
+    # CSS: botões clean/azul (sem vermelho)
     st.markdown("""
     <style>
     .stButton > button {
@@ -623,7 +756,7 @@ def main():
 
     logo_path = get_logo_path()
 
-    # Topo: título + autor + logo
+    # Topo: logo + título
     cols_top = st.columns([1, 8])
     with cols_top[0]:
         if logo_path:
@@ -747,6 +880,10 @@ Gere um RESUMO GERAL técnico, objetivo, em português, com:
 - Recomendações de próximos passos
 - Limitações: inspeção visual por fotos, sem medições/ensaios
 
+Sugestão de formatação:
+- Use títulos: "Principais Achados", "Pontos de Atenção", "Recomendações de Próximos Passos", "Limitações"
+- Use lista numerada para os achados.
+
 Retorne APENAS texto (sem JSON).
 """.strip()
 
@@ -766,7 +903,6 @@ Retorne APENAS texto (sem JSON).
                 "model": model_name,
                 "n_images": len(items),
                 "elapsed_s": round(ended - started, 2),
-                "timezone": TZ_NAME,
             },
             "items": items,
             "summary": {"text": summary_text},
@@ -776,7 +912,7 @@ Retorne APENAS texto (sem JSON).
         st.session_state.analise_pronta = True
         status.success("Análise concluída com sucesso!")
 
-    # Sempre renderiza se pronto (evita “apagão”)
+    # Sempre renderiza se pronto
     if st.session_state.analise_pronta and st.session_state.report:
         render_report(st.session_state.report)
 
